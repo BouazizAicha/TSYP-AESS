@@ -67,16 +67,21 @@ docker compose up -d --build        # first build ≈ 15 min (ROS image), then s
 
 | Actor | Behaviour |
 |-------|-----------|
-| **Writer** (`writer_sim_node`) | Drives an ellipse (4 × 3 m), publishes lidar, odometry, battery, diagnostics. **Injected faults:** lidar dies for 10 s every minute; battery drains and goes WARN < 30 %, ERROR < 15 %, then is "swapped" |
-| **Fake ONA** (`parsed_targets_sim`) | `target_01` moves (stays LIVE) · `target_02` published 25 s then silent (ages → LOST) · `target_03` appears then disappears · `target_04` is an old report. Beacon **B-1** (victim) appears after 10 s, **B-2** (hazard) after 30 s |
-| **Executor** (`executor_sim_node`) | Waits at home. On a mission it drives to the beacon at 0.7 m/s, inspects 4 s (`inspecting`), returns (`returning` → `standby`) |
+| **Writer** (`writer_sim_node`) | Wanders to random waypoints **inside the zone defined in `ros2/zone.json`** (dashed orange rectangle on the map; never leaves it), publishes lidar, odometry, battery, diagnostics. **Injected faults:** lidar dies for 10 s every minute; battery drains and goes WARN < 30 %, ERROR < 15 %, then is "swapped" |
+| **Fake ONA** (`parsed_targets_sim`) | `target_01` moves (stays LIVE) · `target_02` published 25 s then silent (ages → LOST) · `target_03` appears then disappears · `target_04` is an old report. Targets sit at random places of the zone, well apart from each other, reshuffled every cycle. A beacon (victim or hazard) is dropped **where the Writer is** every 20–35 s, up to 12 (`SIM_SEED=<n>` makes it repeatable) |
+| **Executor** (`executor_sim_node`) | **Autonomous**: waits at home; as soon as it is free the bridge sends it to the next unvisited beacon (critical first, then arrival order). It drives at 1.5 m/s, inspects 4 s (`inspecting`), returns (`returning` → `standby`). Set `AUTO_DISPATCH=0` on the `ros` service to disable |
+
+### Robot zone (keep the robots on the building, off the road)
+
+The simulated robots only move inside the polygon in `ros2/zone.json` (metres around the anchor), drawn as a dashed orange outline on the map. It is currently set on the dark-brown block west of the street (white courtyard included). To change it, edit the `polygon` corners (or use the rectangle form `x`, `y`, `cx`, `cy`, `rotDeg`) and run `docker compose up -d --build`. A convex shape works best; the Writer refuses any step that would leave the zone.
 
 ### Try it
 
 1. Open the dashboard. Pills should read `Link open`, `ONA / MQTT connected`.
-2. Wait ~10 s for **B-1**, select it in *Beacons*, click **Send Executor to B-1**.
-3. Mission goes `pending → active → done`; the Executor crosses the map (use *Follow → Executor*).
-4. At `:21` of each minute the lidar fails: Writer shows `fault(lidar)` and a *sensor/hardware* event.
+2. Wait ~10 s: the first beacon drops and the Executor leaves **by itself** (an *Executor auto-dispatched* line appears in the event feed). Missions go `pending → active → done`; use *Follow → Executor*.
+3. Manual override stays available in the side panel (not on the map): select a beacon in *Beacons*, click **Send Executor to …**, or **Cancel** a mission. A cancelled or manually sent beacon is never auto-visited again.
+4. **Reset map** (top bar) wipes targets, beacons, events and the mission on screen, cancels the Executor and restarts the simulators from scratch (Writer from the origin, new random layout).
+5. At `:21` of each minute the lidar fails: Writer shows `fault(lidar)` and a *sensor/hardware* event.
 
 ---
 
@@ -91,7 +96,7 @@ docker compose up -d --build        # first build ≈ 15 min (ROS image), then s
 | `events/<id>` | `{id, type: hazard|victim|obstacle|system, pos, severity: info|warn|critical, source, ts, note}` |
 | `beacons/<id>` | `{id, pos, info, source, ts, status}` |
 | `missions/<id>` | `{id, targetRobot, objective, target:{beaconId,pos}, status, updatedAt, ts}` |
-| `cmd/<action>` | the dashboard command envelope (`assign-mission`, `cancel-mission`, `request-status`) |
+| `cmd/<action>` | the dashboard command envelope (`assign-mission`, `cancel-mission`, `request-status`, `reset-map`) |
 
 Units: **metres in a local frame** (origin = Writer start). Time: ISO-8601 UTC **from the source**.
 Full details: [`docs/ona-contract.md`](docs/ona-contract.md) · single source of truth: `shared/contract.js`.
@@ -169,9 +174,9 @@ docker compose exec ros bash -c "for p in /proc/[0-9]*; do grep -qa 'writer_sim_
 
 | Component | Variables |
 |-----------|-----------|
-| Bridge (`ros`) | `MQTT_HOST` (default `192.168.190.1`; compose sets `mosquitto`), `MQTT_PORT`, `ROBOT_ID`, `ANCHOR_LAT`, `ANCHOR_LON`, `SIM_ONA` |
+| Bridge (`ros`) | `MQTT_HOST` (default `192.168.190.1`; compose sets `mosquitto`), `MQTT_PORT`, `ROBOT_ID`, `ANCHOR_LAT`, `ANCHOR_LON`, `SIM_ONA`, `SIM_SEED`, `AUTO_DISPATCH` |
 | Backend | `MQTT_URL`, `WS_PORT`, `MQTT_TOPICS`, `CMD_TOPIC_PREFIX`, `HEARTBEAT_MS`, `SNAPSHOT_CAP` |
-| Dashboard (build time) | `VITE_WS_URL`, `VITE_LIVE_MS`, `VITE_STALE_MS`, `VITE_DECAY_LAMBDA`, `VITE_ELLIPSE_GROWTH`, `VITE_RESCOUT_POD`, `VITE_ANCHOR_LAT`, `VITE_ANCHOR_LON` |
+| Dashboard (build time) | `VITE_WS_URL`, `VITE_LIVE_MS`, `VITE_STALE_MS`, `VITE_DECAY_LAMBDA`, `VITE_ELLIPSE_GROWTH`, `VITE_RESCOUT_POD`, `VITE_ELLIPSE_SCALE` (default 0.4), `VITE_ELLIPSE_HIDE_S` (default 15; the map stops drawing a target's ellipse after this age, 0 = never), `VITE_ANCHOR_LAT`, `VITE_ANCHOR_LON` |
 
 ---
 
@@ -197,7 +202,7 @@ dashboard without ROS.
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| ROS 2 bridge | `cd ros2 && pip install pytest && python -m pytest tests` | target/beacon conversion, health tracker (sensor vs node-down), mission lifecycle, Executor model — 19 tests, no ROS needed |
+| ROS 2 bridge | `cd ros2 && pip install pytest && python -m pytest tests` | target/beacon conversion, health tracker (sensor vs node-down), mission lifecycle, Executor model, auto-dispatch queue — 22 tests, no ROS needed |
 | Backend | `cd backend && npm test` | contract, gateway, WS lifecycle, MQTT loopback (skips without a broker) |
 | Dashboard | `cd dashboard && npm test` | staleness, PoD decay, ellipse growth, WS client (15 tests) |
 

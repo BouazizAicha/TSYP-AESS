@@ -29,6 +29,10 @@ export function createGateway({ snapshotCap = 500 } = {}) {
         forwardToMqtt: null,
       };
     }
+    if (cmd && cmd.action === 'reset-map') {
+      latestById.clear(); // un nouveau client qui fait `sync` ne recoit plus l'ancienne carte
+      return { replies: [ack(msg.id, 'reset', { action: cmd.action })], forwardToMqtt: msg };
+    }
     if (cmd) {
       return { replies: [ack(msg.id, 'received', { action: cmd.action })], forwardToMqtt: msg };
     }

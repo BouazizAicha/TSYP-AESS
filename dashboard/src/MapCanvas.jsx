@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import { ELLIPSE, ellipseVisible } from './staleness.js';
+import { ring as zoneRingOf } from './zone.js';
 
 // Props: targets, robots, trails {writer:[], executor:[]}, beacons, events, mission, layers, selectedBeacon
-export default function MapCanvas({ targets, robots, trails, beacons, events, mission, layers, selectedBeacon }) {
+export default function MapCanvas({ targets, robots, trails, beacons, events, mission, layers, selectedBeacon, zone }) {
   const ref = useRef(null);
   const [view, setView] = useState({ scale: 60, ox: null, oy: null });
 
@@ -22,6 +24,11 @@ export default function MapCanvas({ targets, robots, trails, beacons, events, mi
     ctx.beginPath(); ctx.moveTo(ox - 20, oy); ctx.lineTo(ox + 20, oy); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(ox, oy - 20); ctx.lineTo(ox, oy + 20); ctx.stroke();
 
+    // robots' allowed area (ros2/zone.json)
+    ctx.save(); ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 3; ctx.setLineDash([16, 12]); ctx.beginPath();
+    zoneRingOf(zone || []).forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))));
+    ctx.stroke(); ctx.restore();
+
     // trails — spatial memory
     if (layers.trails) {
       for (const [rid, pts] of Object.entries(trails)) {
@@ -34,7 +41,7 @@ export default function MapCanvas({ targets, robots, trails, beacons, events, mi
     // beacons
     if (layers.beacons) {
       for (const b of Object.values(beacons)) {
-        ctx.fillStyle = b.id === selectedBeacon ? '#ffd43b' : '#4dabf7';
+        ctx.fillStyle = '#4dabf7';
         const bx = X(b.pos.x), by = Y(b.pos.y);
         ctx.save(); ctx.translate(bx, by); ctx.rotate(Math.PI / 4); ctx.fillRect(-10, -10, 20, 20); ctx.restore();
         ctx.fillStyle = '#e6edf5'; ctx.font = '600 22px system-ui';
@@ -82,9 +89,12 @@ export default function MapCanvas({ targets, robots, trails, beacons, events, mi
         const x = X(t.pos.x), y = Y(t.pos.y);
         ctx.save(); ctx.translate(x, y); ctx.rotate((-t.uncertainty.angleDeg * Math.PI) / 180);
         ctx.strokeStyle = t._stale === 'LOST' ? '#ff5252' : t._stale === 'STALE' ? '#ffb020' : '#35d07f';
-        ctx.beginPath();
-        ctx.ellipse(0, 0, (t._sigmaX ?? t.uncertainty.sigmaX) * scale * 2, (t._sigmaY ?? t.uncertainty.sigmaY) * scale * 2, 0, 0, Math.PI * 2);
-        ctx.stroke(); ctx.restore();
+        if (ellipseVisible(t._ageMs ?? 0)) {
+          ctx.beginPath();
+          ctx.ellipse(0, 0, (t._sigmaX ?? t.uncertainty.sigmaX) * scale * 2 * ELLIPSE.SCALE, (t._sigmaY ?? t.uncertainty.sigmaY) * scale * 2 * ELLIPSE.SCALE, 0, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
         ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = '#e6edf5'; ctx.font = '600 22px system-ui';
         ctx.fillText(`${t.id} PoD ${(((t._pod ?? t.confidence) ?? 0) * 100).toFixed(0)}%${t._rescout ? ' · RE-SCOUT' : ''}`, x + 14, y - 12 + ([-1, 0, 1][ti % 3]) * 26);

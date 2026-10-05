@@ -34,6 +34,7 @@ from sensor_msgs.msg import BatteryState, LaserScan
 from std_msgs.msg import String
 
 import bridge_core as core
+import zone
 
 
 def guarded(fn):
@@ -112,6 +113,7 @@ class RosMqttBridge(Node):
         self.missions = core.MissionTracker(start=int(time.time()) % 1000 * 10 + 1)
         self.last_mission_pub = 0.0
         self.beacons = {}   # id -> {'payload', 'last_pub'}
+        self.dispatch = core.AutoDispatcher(enabled=os.environ.get('AUTO_DISPATCH', '1') != '0')
         self.targets = {}   # topic -> [payload, derniere publication, derniere reception]
         self.n_targets_in = 0
 
@@ -124,6 +126,8 @@ class RosMqttBridge(Node):
         self.create_subscription(Odometry, '/executor/odom', self.on_exec_odom, 10)
         self.create_subscription(String, '/executor/status', self.on_exec_status, 10)
         self.exec_pub = self.create_publisher(String, '/executor/mission', 10)
+        self.zone_pub = self.create_publisher(String, '/sim/zone', 10)     # idem : zone dessinee dans le dashboard
+        self.reset_pub = self.create_publisher(String, '/sim/reset', 10)   # simulateurs uniquement (ignore par le vrai robot)
 
         self.create_timer(0.5, self.tick_telemetry)
         self.create_timer(1.0, self.tick_watchdog)
@@ -160,6 +164,7 @@ class RosMqttBridge(Node):
         self.beacons[payload['id']] = {'payload': payload, 'last_pub': now}
         self.out.publish(topic, payload)
         if first:
+            self.dispatch.add(payload['id'], event['severity'] if event else 'info')
             self.get_logger().info(f"nouvelle balise {payload['id']} -> {topic}")
             if event:
                 self.emit_event(event)
@@ -235,6 +240,54 @@ class RosMqttBridge(Node):
                 return
             self.handle_command(topic, text)
 
+    def start_mission(self, payload, beacons, now):
+        res = self.missions.assign(payload, beacons, now)
+        if res is None:
+            self.get_logger().warn(f"assign-mission ignoree : balise inconnue ({payload.get('beaconId')})")
+            return False
+        mission, ros_cmd = res
+        self.dispatch.mark(mission['target']['beaconId'])
+        self.out.publish(f"missions/{mission['id']}", mission)
+        self.last_mission_pub = now
+        self.exec_pub.publish(String(data=json.dumps(ros_cmd)))
+        self.get_logger().info(f"mission {mission['id']} : Executor -> {mission['target']['beaconId']}")
+        return True
+
+    def auto_dispatch(self):
+        """Executor autonome : des qu'il est libre, il part vers la prochaine balise connue."""
+        bid = self.dispatch.next(self.missions.busy())
+        if bid is None:
+            return
+        now = time.time()
+        beacons = {k: v['payload'] for k, v in self.beacons.items()}
+        if self.start_mission({'beaconId': bid, 'objective': f'Auto: inspect {bid}'}, beacons, now):
+            b = beacons[bid]
+            self.emit_event({'key': f'dispatch-{bid}', 'type': 'system', 'severity': 'info', 'now': now,
+                             'note': f'Executor auto-dispatched to beacon {bid}',
+                             'pos': (b['pos']['x'], b['pos']['y'])})
+
+    def set_zone(self, polygon):
+        """Zone dessinee dans le dashboard : les simulateurs la respectent et repartent de zero."""
+        pts = zone.valid_polygon(polygon)
+        if not pts:
+            self.get_logger().warn('set-zone ignoree : polygone invalide')
+            return
+        self.reset_map(notify=False)
+        self.zone_pub.publish(String(data=json.dumps({'polygon': [[round(x, 2), round(y, 2)] for x, y in pts]})))
+        self.get_logger().info(f'ZONE : nouveau polygone de {len(pts)} sommets')
+
+    def reset_map(self, notify=True):
+        """Bouton Reset : on oublie cibles, balises et mission ; les simulateurs repartent de zero."""
+        if self.missions.busy():
+            self.exec_pub.publish(String(data=json.dumps({'cancel': True, 'mission_id': self.missions.current['id']})))
+        self.missions.current = None
+        self.beacons.clear()
+        self.targets.clear()
+        self.dispatch = core.AutoDispatcher(enabled=self.dispatch.enabled)
+        if notify:
+            self.reset_pub.publish(String(data='reset'))
+        self.get_logger().info('RESET : carte remise a zero (cibles, balises, mission)')
+
     def handle_command(self, topic, text):
         parsed = core.parse_command(topic, text)
         if parsed is None:
@@ -243,15 +296,11 @@ class RosMqttBridge(Node):
         now = time.time()
         beacons = {k: v['payload'] for k, v in self.beacons.items()}
         if action == 'assign-mission':
-            res = self.missions.assign(payload, beacons, now)
-            if res is None:
-                self.get_logger().warn(f"assign-mission ignoree : balise inconnue ({payload.get('beaconId')})")
-                return
-            mission, ros_cmd = res
-            self.out.publish(f"missions/{mission['id']}", mission)
-            self.last_mission_pub = now
-            self.exec_pub.publish(String(data=json.dumps(ros_cmd)))
-            self.get_logger().info(f"mission {mission['id']} : Executor -> {mission['target']['beaconId']}")
+            self.start_mission(payload, beacons, now)
+        elif action == 'reset-map':
+            self.reset_map()
+        elif action == 'set-zone':
+            self.set_zone(payload.get('polygon'))
         elif action == 'cancel-mission':
             res = self.missions.cancel(payload, now)
             if res:
@@ -293,6 +342,7 @@ class RosMqttBridge(Node):
 
     @guarded
     def tick_watchdog(self):
+        self.auto_dispatch()
         for ev in self.health.check_silence(time.time()):
             self.emit_event(ev)
 

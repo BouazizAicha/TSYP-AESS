@@ -7,8 +7,10 @@ mission_status expose a l'exterieur : None | 'active' | 'done' | 'cancelled'
 """
 import math
 
-HOME = (-5.5, -4.0)
-SPEED = 0.7        # m/s
+import zone
+
+HOME = zone.home()   # base de l'Executor, dans la zone
+SPEED = 1.2        # m/s
 ARRIVE_M = 0.35    # distance consideree comme "arrive"
 INSPECT_S = 4.0
 
@@ -25,6 +27,9 @@ class ExecutorModel:
         self.target = None
         self.inspect_left = 0.0
         self.battery = 88.0
+
+    def reset(self, home=None):
+        self.__init__(home or self.home, self.speed)
 
     # --- ordres ---
     def assign(self, mission_id, target_xy):

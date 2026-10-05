@@ -98,7 +98,7 @@ export function normalizeMission(raw) {
   };
 }
 
-export const COMMAND_ACTIONS = Object.freeze(['sync', 'assign-mission', 'cancel-mission', 'request-status']);
+export const COMMAND_ACTIONS = Object.freeze(['sync', 'assign-mission', 'cancel-mission', 'request-status', 'reset-map', 'set-zone']);
 
 // Dashboard -> backend command envelope validation. Returns { id, action, rest } or null.
 export function validateCommand(msg) {

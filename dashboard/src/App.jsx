@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, lazy, Suspense } from 'react';
 import { createWSClient } from './wsClient.js';
 import { targetAge, classifyStaleness, currentPod, grownSigma, DECAY } from './staleness.js';
 import MapCanvas from './MapCanvas.jsx';
+import { defaultPolygon } from './zone.js';
 import {
   RobotCard, MissionCard, TargetsCard, BeaconPanel, EventFeed, CommandLog, SystemChain,
   ROBOT_COLORS, ageMs, fmtAge,
@@ -48,6 +49,8 @@ export default function App() {
   const [layers, setLayers] = useState({ trails: true, beacons: true, events: true, targets: true });
   const [selectedBeacon, setSelectedBeacon] = useState(null);
   const [mapMode, setMapMode] = useState('openlayers'); // openlayers | canvas
+  const [zone] = useState(defaultPolygon); // area the robots may use (ros2/zone.json)
+  const [mapKey, setMapKey] = useState(0); // bumped on reset so the map re-fits on the new data
 
   useEffect(() => {
     const c = createWSClient({
@@ -81,6 +84,18 @@ export default function App() {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Reset: forget everything on screen AND ask the bridge/simulators to start a fresh scenario.
+  const resetMap = () => {
+    sendCmd('reset-map');
+    clearLocal();
+  };
+
+  const clearLocal = (remount = true) => {
+    setTargets({}); setRobots({}); setTrails({ writer: [], executor: [] }); setBeacons({});
+    setEvents([]); setMission(null); setAcks([]); setSelectedBeacon(null);
+    if (remount) setMapKey((k) => k + 1);
+  };
 
   const sendCmd = (action, extra = {}) => {
     const id = `dash-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -123,7 +138,7 @@ export default function App() {
   const linkState = conn.ws === 'open' ? 'LIVE' : conn.ws === 'connecting' ? 'STALE' : 'LOST';
   const onaState = !ona ? 'idle' : ona.ona === 'connected' ? 'LIVE' : 'LOST';
 
-  const mapProps = { targets: withStale, robots, trails, beacons, events, mission, layers, selectedBeacon };
+  const mapProps = { targets: withStale, robots, trails, beacons, events, mission, layers, selectedBeacon, zone };
 
   return (
     <div className="app">
@@ -143,6 +158,7 @@ export default function App() {
           <Pill label="Dropped" value={ona?.dropped ?? '—'} state={ona?.dropped ? 'STALE' : 'idle'} />
           {Object.keys(pending).length > 0 && <Pill label="Pending" value={Object.keys(pending).length} state="STALE" />}
           {critCount > 0 && <Pill label="Critical" value={critCount} state="LOST" />}
+          <button className="btn btn-danger btn-reset" onClick={resetMap} title="Clear the map and restart the scenario">Reset map</button>
           <span className="clock">{new Date(now).toLocaleTimeString()}</span>
         </div>
       </header>
@@ -171,10 +187,10 @@ export default function App() {
             </div>
             {mapMode === 'openlayers' ? (
               <Suspense fallback={<div className="map-loading">loading map…</div>}>
-                <OlMap {...mapProps} />
+                <OlMap key={mapKey} {...mapProps} />
               </Suspense>
             ) : (
-              <MapCanvas {...mapProps} />
+              <MapCanvas key={mapKey} {...mapProps} />
             )}
             <Legend />
           </section>

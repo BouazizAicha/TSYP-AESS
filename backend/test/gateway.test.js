@@ -54,3 +54,14 @@ test('sim-publisher payload shapes stay valid', async () => {
   assert.ok(gw.ingest('targets/T-01', JSON.stringify({ id: 'T-01', pos: { x: 1, y: 2 }, ts: now, confidence: 0.75 + 0.2 * Math.sin(t), source: 'writer', status: 'tracked', uncertainty: { sigmaX: 1.2, sigmaY: 0.7, angleDeg: 30 } })));
   assert.ok(gw.ingest('missions/M-1', JSON.stringify({ id: 'M-1', targetRobot: 'executor', objective: 'Inspect B-1', target: { beaconId: 'B-1' }, status: 'active', updatedAt: now, ts: now })));
 });
+
+test('reset-map clears the snapshot, acks "reset" and forwards to MQTT', () => {
+  const gw = createGateway();
+  gw.ingest('targets/T', JSON.stringify({ id: 'T', pos: { x: 0, y: 0 }, ts: now }));
+  assert.equal(gw.snapshot.length, 1);
+  const msg = { kind: 'cmd', id: 'r1', ts: now, source: 'dashboard', payload: { action: 'reset-map' } };
+  const out = gw.handleMessage(msg);
+  assert.equal(gw.snapshot.length, 0);
+  assert.equal(out.replies[0].payload.status, 'reset');
+  assert.equal(out.forwardToMqtt, msg);
+});

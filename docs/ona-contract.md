@@ -15,7 +15,7 @@ Unknown kinds dropped + counted. Dedupe by `id`.
 
 ## Commands (dashboard -> WS -> MQTT `cmd/<action>`)
 
-`{ kind:'cmd', id, ts, source:'dashboard', payload:{ action:'sync|assign-mission|cancel-mission|request-status', ... } }`
+`{ kind:'cmd', id, ts, source:'dashboard', payload:{ action:'sync|assign-mission|cancel-mission|request-status|reset-map', ... } }`
 Allowed actions validated in `shared/contract.js`; invalid dropped + counted, never published to MQTT.
 Backend replies `cmd.ack: { ackFor, status: received|synced, action?, count? }`.
 `sync` replays snapshot (latest per id, cap 500) then ack; never republished to MQTT.

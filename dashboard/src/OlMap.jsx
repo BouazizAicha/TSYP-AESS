@@ -10,6 +10,8 @@ import Feature from 'ol/Feature.js';
 import Point from 'ol/geom/Point.js';
 import LineString from 'ol/geom/LineString.js';
 import Polygon from 'ol/geom/Polygon.js';
+import { ELLIPSE, ellipseVisible } from './staleness.js';
+import { ring as zoneRingOf } from './zone.js';
 import { boundingExtent, buffer } from 'ol/extent.js';
 import { Attribution, ScaleLine, defaults as defaultControls } from 'ol/control.js';
 import { Stroke, Fill, Style, Text, RegularShape, Circle as CircleStyle } from 'ol/style.js';
@@ -57,8 +59,8 @@ function label(text, opts = {}) {
 }
 
 // Every position the map draws, for "fit to data".
-function dataCoords({ robots, targets, beacons, trails, mission }) {
-  const pts = [];
+function dataCoords({ robots, targets, beacons, trails, mission, zone }) {
+  const pts = zoneRingOf(zone || []).map(([x, y]) => P(x, y)); // the allowed zone is always in frame
   for (const r of Object.values(robots || {})) if (r?.pos) pts.push(P(r.pos.x, r.pos.y));
   for (const t of Object.values(targets || {})) if (t?.pos) pts.push(P(t.pos.x, t.pos.y));
   for (const b of Object.values(beacons || {})) if (b?.pos) pts.push(P(b.pos.x, b.pos.y));
@@ -68,7 +70,7 @@ function dataCoords({ robots, targets, beacons, trails, mission }) {
 }
 
 // Same props as MapCanvas so App can A/B them.
-export default function OlMap({ targets, robots, trails, beacons, events, mission, layers, selectedBeacon }) {
+export default function OlMap({ targets, robots, trails, beacons, events, mission, layers, selectedBeacon, zone }) {
   const divRef = useRef(null);
   const mapRef = useRef(null);
   const srcRef = useRef(null);
@@ -91,7 +93,7 @@ export default function OlMap({ targets, robots, trails, beacons, events, missio
 
   function fitToData(animate = true) {
     const v = mapRef.current?.getView();
-    const pts = dataCoords({ robots, targets, beacons, trails, mission });
+    const pts = dataCoords({ robots, targets, beacons, trails, mission, zone });
     if (!v || pts.length === 0) return false;
     // Always include the area around the local origin (writer start) so the
     // first fit shows the whole site, not just one robot.
@@ -104,6 +106,7 @@ export default function OlMap({ targets, robots, trails, beacons, events, missio
   useEffect(() => {
     const src = {
       grid: new VectorSource({ features: gridFeatures() }),
+      zone: new VectorSource(),
       trails: new VectorSource(),
       beacons: new VectorSource(),
       events: new VectorSource(),
@@ -115,6 +118,7 @@ export default function OlMap({ targets, robots, trails, beacons, events, missio
     const major = new Style({ stroke: new Stroke({ color: '#2b3a4b', width: 1.5 }) });
     const osmLayer = new TileLayer({ source: new OSM(), zIndex: -1 });
     const gridLayer = new VectorLayer({ source: src.grid, style: (f) => (f.get('major') ? major : minor), zIndex: 0, visible: false });
+    const zoneLayer = new VectorLayer({ source: src.zone, zIndex: 0.5, style: new Style({ stroke: new Stroke({ color: '#ffb020', width: 2, lineDash: [10, 8] }) }) });
     const trailsLayer = new VectorLayer({ source: src.trails, zIndex: 1 });
     const missionLayer = new VectorLayer({ source: src.mission, zIndex: 2 });
     const eventsLayer = new VectorLayer({ source: src.events, zIndex: 3 });
@@ -123,7 +127,7 @@ export default function OlMap({ targets, robots, trails, beacons, events, missio
     const robotsLayer = new VectorLayer({ source: src.robots, zIndex: 6 });
     const map = new Map({
       target: divRef.current,
-      layers: [osmLayer, gridLayer, trailsLayer, missionLayer, eventsLayer, beaconsLayer, targetsLayer, robotsLayer],
+      layers: [osmLayer, gridLayer, zoneLayer, trailsLayer, missionLayer, eventsLayer, beaconsLayer, targetsLayer, robotsLayer],
       view: new View({ center: HOME.center, resolution: HOME.resolution, minResolution: 0.005, maxResolution: 50 }),
       controls: defaultControls({ zoom: false, rotate: false }).extend([
         new Attribution({ collapsible: true }),
@@ -134,6 +138,14 @@ export default function OlMap({ targets, robots, trails, beacons, events, missio
     srcRef.current = { src, osmLayer, gridLayer, layers: { trailsLayer, missionLayer, eventsLayer, beaconsLayer, targetsLayer } };
     return () => map.setTarget(null);
   }, []);
+
+  // allowed-zone outline (follows the `zone` prop, which the Draw tool can replace)
+  useEffect(() => {
+    const z = srcRef.current?.src.zone;
+    if (!z) return;
+    z.clear();
+    if (zone && zone.length >= 3) z.addFeature(new Feature({ geometry: new LineString(zoneRingOf(zone).map(([x, y]) => P(x, y))) }));
+  }, [zone]);
 
   // base switch: OSM tiles vs offline grid (same center: the site anchor)
   useEffect(() => {
@@ -177,7 +189,7 @@ export default function OlMap({ targets, robots, trails, beacons, events, missio
     if (layers.beacons) {
       for (const b of Object.values(beacons || {})) {
         const f = new Feature({ geometry: new Point(P(b.pos.x, b.pos.y)) });
-        const sel = b.id === selectedBeacon;
+        const sel = false; // manual selection is done from the Beacons panel, not on the map
         const styles = [new Style({
           image: new RegularShape({ points: 4, radius: 12, angle: 0, fill: new Fill({ color: sel ? '#ffd43b' : '#4dabf7' }), stroke: new Stroke({ color: '#fff', width: 2 }) }),
           text: label(b.id, { offsetY: -20 }),
@@ -244,17 +256,20 @@ export default function OlMap({ targets, robots, trails, beacons, events, missio
     if (layers.targets) {
       for (const [ti, t] of Object.values(targets || {}).entries()) {
         const lost = t._stale === 'LOST';
-        const el = new Feature({ geometry: new Polygon(ellipseRing(t.pos.x, t.pos.y, t._sigmaX ?? t.uncertainty.sigmaX, t._sigmaY ?? t.uncertainty.sigmaY, t.uncertainty.angleDeg)) });
-        el.setStyle(new Style({
-          stroke: new Stroke({ color: lost ? staleColor(t._stale) + '66' : staleColor(t._stale), width: 2 }),
-          fill: new Fill({ color: staleColor(t._stale) + '22' }),
-        }));
+        let el = null;
+        if (ellipseVisible(t._ageMs ?? 0)) { // too old -> no circle, the dot + PoD label stay
+          el = new Feature({ geometry: new Polygon(ellipseRing(t.pos.x, t.pos.y, t._sigmaX ?? t.uncertainty.sigmaX, t._sigmaY ?? t.uncertainty.sigmaY, t.uncertainty.angleDeg, K * ELLIPSE.SCALE)) });
+          el.setStyle(new Style({
+            stroke: new Stroke({ color: lost ? staleColor(t._stale) + '66' : staleColor(t._stale), width: 2 }),
+            fill: new Fill({ color: staleColor(t._stale) + '22' }),
+          }));
+        }
         const dot = new Feature({ geometry: new Point(P(t.pos.x, t.pos.y)) });
         dot.setStyle(new Style({
           image: new CircleStyle({ radius: 6, fill: new Fill({ color: '#fff' }), stroke: new Stroke({ color: '#0b0e13', width: 2 }) }),
           text: label(`${t.id} PoD ${(((t._pod ?? t.confidence) ?? 0) * 100).toFixed(0)}%${t._rescout ? ' · RE-SCOUT' : ''}`, { offsetX: 12, offsetY: [-16, 0, 16][ti % 3], textAlign: 'left' }), // étiquettes décalées : pas de chevauchement
         }));
-        src.targets.addFeature(el);
+        if (el) src.targets.addFeature(el);
         src.targets.addFeature(dot);
       }
     }
